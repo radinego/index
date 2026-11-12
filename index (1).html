@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VTMS</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:760px;margin:20px auto;padding:0 12px}
+input,select,button{padding:8px;margin:4px 0;font-size:16px}
+table{border-collapse:collapse;width:100%}
+td,th{border-bottom:1px solid #ccc;padding:6px;text-align:left}
+.box{border:1px solid #ccc;border-radius:8px;padding:10px;margin:10px 0}
+.on{background:#1f6feb;color:#fff}
+.err{color:#c00;font-weight:bold}
+.ok{color:#080;font-weight:bold}
+</style>
+</head>
+<body>
+<h1>VTMS</h1>
+
+<!-- LOGIN -->
+<div id="login">
+  <input id="user" placeholder="Username"><br>
+  <input id="pass" type="password" placeholder="Password"><br>
+  <button onclick="signIn()">Sign in</button>
+  <p id="msg" class="err"></p>
+  <p>Demo: manager / Manager#2026 and player1 / Player#2026</p>
+</div>
+
+<!-- APP -->
+<div id="app" style="display:none">
+  <p>Signed in as <b id="who"></b> <button onclick="signOut()">Sign out</button></p>
+  <div id="tabs"></div>
+  <p id="info"></p>
+  <div id="r1" class="box"></div>
+  <table id="table"></table>
+  <div id="form" class="box"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ---------- 1. DATA MODEL: three tables ---------- */
+const SCHEMA = {
+  players:  {title:"Players",    fields:[{k:"name",t:"text"},{k:"pos",t:"select",o:["Setter","Libero","Outside Hitter","Middle Blocker","Opposite"]}]},
+  sessions: {title:"Sessions",   fields:[{k:"date",t:"date"},{k:"place",t:"text"}]},
+  att:      {title:"Attendance", fields:[{k:"sid",t:"ref",o:"sessions"},{k:"pid",t:"ref",o:"players"},{k:"status",t:"select",o:["Present","Late","Absent"]}]}
+};
+const DEFAULT = {
+  players:[{id:1,name:"Player 1",pos:"Setter"},{id:2,name:"Player 2",pos:"Libero"},{id:3,name:"Player 3",pos:"Outside Hitter"}],
+  sessions:[{id:1,date:"2026-09-07",place:"Gym A"},{id:2,date:"2026-09-09",place:"Gym A"}],
+  att:[{id:1,sid:1,pid:1,status:"Present"},{id:2,sid:1,pid:2,status:"Late"},{id:3,sid:1,pid:3,status:"Absent"}]
+};
+let db = JSON.parse(localStorage.getItem("vtms") || "null") || JSON.parse(JSON.stringify(DEFAULT));
+const store = () => localStorage.setItem("vtms", JSON.stringify(db));
+
+let role = null, myPid = null, tab = "players", editId = null, pending = null;
+
+/* ---------- 2. SIGN IN WITH ROLES (salted hash) ---------- */
+const users = {manager:{salt:"k3x9",role:"manager",pid:null}, player1:{salt:"p7w2",role:"player",pid:1}};
+async function sha(t){
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2,"0")).join("");
+}
+(async () => {
+  users.manager.hash = await sha("k3x9Manager#2026");
+  users.player1.hash = await sha("p7w2Player#2026");
+})();
+async function signIn(){
+  const name = $("user").value.trim(), u = users[name];
+  if(!u || await sha(u.salt + $("pass").value) !== u.hash){ $("msg").textContent = "Wrong username or password"; return; }
+  role = u.role; myPid = u.pid; $("msg").textContent = "";
+  tab = role === "manager" ? "players" : "att";
+  $("login").style.display = "none"; $("app").style.display = "block";
+  $("who").textContent = name + " (" + role + ")";
+  render();
+}
+function signOut(){
+  role = null; myPid = null; editId = null; pending = null; $("pass").value = "";
+  $("app").style.display = "none"; $("login").style.display = "block";
+}
+
+/* ---------- 3. SHOW DATA ---------- */
+function say(text, bad){ $("info").innerHTML = '<span class="' + (bad ? "err" : "ok") + '">' + esc(text) + "</span>"; }
+function label(table, id){            // turns an id into a readable name
+  const r = db[table].find(x => x.id === id);
+  return r ? (table === "players" ? r.name : r.date) : "?";
+}
+function cell(f, r){
+  return esc(f.t === "ref" ? label(f.o, r[f.k]) : r[f.k]);
+}
+function render(){ drawTabs(); drawR1(); drawTable(); drawForm(); }
+function drawTabs(){
+  const names = role === "manager" ? ["players","sessions","att"] : ["att"];
+  $("tabs").innerHTML = names.map(n =>
+    '<button class="' + (n === tab ? "on" : "") + '" onclick="openTab(\'' + n + '\')">' +
+    (role === "player" ? "My attendance" : SCHEMA[n].title) + "</button>").join(" ");
+}
+function openTab(n){ tab = n; editId = null; pending = null; $("info").innerHTML = ""; render(); }
+function drawTable(){
+  const S = SCHEMA[tab];
+  let rows = db[tab];
+  if(role === "player") rows = rows.filter(r => r.pid === myPid);   // player sees only own rows
+  $("table").innerHTML = "<tr><th>ID</th>" + S.fields.map(f => "<th>" + f.k + "</th>").join("") + "<th></th></tr>" +
+    rows.map(r => "<tr><td>" + r.id + "</td>" + S.fields.map(f => "<td>" + cell(f, r) + "</td>").join("") + "<td>" +
+      (role === "manager"
+        ? '<button onclick="edit(' + r.id + ')">Edit</button> <button onclick="del(' + r.id + ')">' +
+          (pending === r.id ? "Sure?" : "Delete") + "</button>"
+        : "") + "</td></tr>").join("");
+}
+
+/* ---------- 4. CREATE / UPDATE with checks ---------- */
+function drawForm(){
+  if(role !== "manager"){ $("form").style.display = "none"; return; }
+  $("form").style.display = "block";
+  const S = SCHEMA[tab], cur = editId ? db[tab].find(r => r.id === editId) : null;
+  $("form").innerHTML = "<b>" + (cur ? "Change record " + cur.id : "Add to " + S.title) + "</b><br>" +
+    S.fields.map(f => {
+      const v = cur ? cur[f.k] : "";
+      let input;
+      if(f.t === "select") input = '<select id="f_' + f.k + '">' + f.o.map(o => "<option" + (o === v ? " selected" : "") + ">" + esc(o) + "</option>").join("") + "</select>";
+      else if(f.t === "ref") input = '<select id="f_' + f.k + '">' + db[f.o].map(o => '<option value="' + o.id + '"' + (o.id === v ? " selected" : "") + ">" + esc(f.o === "players" ? o.name : o.date) + "</option>").join("") + "</select>";
+      else input = '<input id="f_' + f.k + '" value="' + esc(v) + '"' + (f.t === "date" ? ' placeholder="YYYY-MM-DD"' : "") + ">";
+      return "<div>" + f.k + "<br>" + input + "</div>";
+    }).join("") +
+    '<button onclick="save()">' + (cur ? "Save changes" : "Add record") + "</button>" +
+    (cur ? ' <button onclick="cancelEdit()">Cancel</button>' : "");
+}
+function check(f, v){                 // returns [value, error]
+  v = String(v).trim();
+  if(f.t === "text"){ if(!v || v.length > 60) return [null, f.k + ": 1-60 characters"]; return [v]; }
+  if(f.t === "date"){
+    const d = new Date(v + "T00:00:00");
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(v) || isNaN(d) || d.toISOString().slice(0,10) !== v) return [null, f.k + ": use a real date YYYY-MM-DD"];
+    return [v];
+  }
+  if(f.t === "select"){ if(!f.o.includes(v)) return [null, f.k + ": pick a value from the list"]; return [v]; }
+  if(f.t === "ref"){ const n = Number(v); if(!db[f.o].some(x => x.id === n)) return [null, f.k + ": record not found"]; return [n]; }
+}
+function save(){
+  if(role !== "manager") return;
+  const rec = {};
+  for(const f of SCHEMA[tab].fields){
+    const [val, err] = check(f, $("f_" + f.k).value);
+    if(err){ say(err, true); return; }
+    rec[f.k] = val;
+  }
+  if(tab === "att" && db.att.some(a => a.sid === rec.sid && a.pid === rec.pid && a.id !== editId)){
+    say("This player already has a row for this session", true); return;
+  }
+  if(editId){ Object.assign(db[tab].find(r => r.id === editId), rec); say("Saved changes to record " + editId); editId = null; }
+  else { rec.id = Math.max(0, ...db[tab].map(r => r.id)) + 1; db[tab].push(rec); say("Added record " + rec.id); }
+  store(); render();
+}
+function edit(id){ editId = id; pending = null; drawForm(); }
+function cancelEdit(){ editId = null; drawForm(); }
+
+/* ---------- 5. DELETE (two clicks + protection) ---------- */
+function del(id){
+  if(role !== "manager") return;
+  if(pending !== id){ pending = id; drawTable(); return; }
+  pending = null;
+  const used = (tab === "players" && db.att.some(a => a.pid === id)) || (tab === "sessions" && db.att.some(a => a.sid === id));
+  if(used){ say("Blocked: this record is used in Attendance (ON DELETE RESTRICT)", true); drawTable(); return; }
+  db[tab] = db[tab].filter(r => r.id !== id); store(); say("Deleted record " + id); render();
+}
+
+/* ---------- 6. SMART FUNCTION: rule R1 ---------- */
+// IF the tag is seen up to 10 min after 19:00 THEN Present
+// IF 11-20 min THEN Late;  IF later THEN Absent (and the manager is notified)
+function drawR1(){
+  const pl = role === "player"
+    ? '<input id="r_p" type="hidden" value="' + myPid + '">'
+    : 'Player<br><select id="r_p">' + db.players.map(p => '<option value="' + p.id + '">' + esc(p.name) + "</option>").join("") + "</select><br>";
+  $("r1").innerHTML = "<b>Rule R1: simulate a BLE check-in at the gate</b><br>" + pl +
+    'Session<br><select id="r_s">' + db.sessions.map(s => '<option value="' + s.id + '">' + esc(s.date) + "</option>").join("") + "</select><br>" +
+    'Minutes after 19:00 (negative = early)<br><input id="r_m" type="number" value="4"><br>' +
+    '<button onclick="checkIn()">Tag seen at the gate</button> <span id="r_out"></span>';
+}
+function checkIn(){
+  const pid = Number($("r_p").value), sid = Number($("r_s").value), m = Number($("r_m").value);
+  if(!isFinite(m) || Math.abs(m) > 600){ $("r_out").innerHTML = '<span class="err">Enter minutes between -600 and 600</span>'; return; }
+  if(role === "player" && pid !== myPid){ $("r_out").innerHTML = '<span class="err">You can only check in yourself</span>'; return; }
+  const status = m <= 10 ? "Present" : m <= 20 ? "Late" : "Absent";
+  const row = db.att.find(a => a.sid === sid && a.pid === pid);
+  if(row) row.status = status;
+  else db.att.push({id: Math.max(0, ...db.att.map(a => a.id)) + 1, sid: sid, pid: pid, status: status});
+  store(); drawTable();
+  $("r_out").innerHTML = '<span class="ok">' + esc(label("players", pid)) + " → " + status + (status === "Absent" ? " (manager notified)" : "") + "</span>";
+}
+</script>
+</body>
+</html>
